@@ -1405,48 +1405,43 @@ DEFINE_TEST(IPC0029, "Cross core sched donation", test_sched_donation_cross_core
 
 
 
+
+/* Fastpath - Check IPC succeeds with a small threshold */
 int
 test_single_client_fastpath_same_prio_threshold(env_t env)
 {
     return single_client_server_chain_test(env, 1, 0, 1);
 }
-DEFINE_TEST(IPC0030, "Client-server inheritance: fastpath, client same prio", test_single_client_fastpath_same_prio_threshold,
-            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+// DEFINE_TEST(IPC0030, "Client-server inheritance: fastpath, client same prio, low threshold success", test_single_client_fastpath_same_prio_threshold,
+//             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
-
-static void threshold_client_fn(seL4_CPtr call_endpoint, seL4_Word reply, volatile int *state)
+/* Slowpath - Check IPC succeeds with a small threshold */
+int
+test_single_client_slowpath_same_prio_threshold(env_t env)
 {
-    seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, 0);
+    return single_client_server_chain_test(env, 0, 0, 1);
+}
+// DEFINE_TEST(IPC0031, "Client-server inheritance: slowpath, client same prio, low threshold success", test_single_client_slowpath_same_prio_threshold,
+//             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
-    seL4_Error error = seL4_Call(call_endpoint, info);
+static void threshold_client_fn(seL4_CPtr call_endpoint, bool fastpath, volatile int *state)
+{
+    uint32_t length = fastpath ? 1 : 8;
+    seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, length);
 
-
-
-
-    int i = 0;
-    while (i < RUNS) {
-        test_eq(seL4_GetMR(0), (seL4_Word) 12345678);
-        seL4_SetMR(0, 12345678);
-
-        ZF_LOGD("Proxy call\n");
-        seL4_Call(call_endpoint, info);
-
-        test_eq(seL4_GetMR(0), (seL4_Word) 0xdeadbeef);
-
-        seL4_SetMR(0, 0xdeadbeef);
-        ZF_LOGD("Proxy replyRecv\n");
-        *state = *state + 1;
-        info = seL4_ReplyRecv(receive_endpoint, info, NULL, reply);
-        i++;
-    }
+    // seL4_MessageInfo_t error = seL4_Call(call_endpoint, info);
+    seL4_NBSend(call_endpoint, info);
+    // if (seL4_MessageInfo_get_label(error)==seL4_IllegalOperation) {
+    //     *state=1;
+    // }
+    return;
 }
 
-
-
-int test_single_client_fastpath_high_threshold_failure(env_t env)
+int test_single_client_high_threshold_failure(env_t env, bool fastpath)
 {
     helper_thread_t client;
     int client_prio = 10;
+    volatile int test_success=0;
 
     create_helper_thread(env, &client);
     set_helper_priority(env, &client, client_prio);
@@ -1455,14 +1450,59 @@ int test_single_client_fastpath_high_threshold_failure(env_t env)
 
     cspacepath_t path;
     vka_cspace_make_path(&env->vka, endpoint, &path);
-    seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 100000);
+    seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 5 * US_IN_S);
 
-    start_helper(env, &proxies[i], (helper_fn_t) proxy_fn, receive_endpoint,
-                    call_endpoint, proxies[i].thread.reply.cptr, (seL4_Word) &proxy_state[i]);
+    seL4_Error error = api_sched_ctrl_configure(simple_get_sched_ctrl(&env->simple, 0), client.thread.sched_context.cptr,
+                                    1 * US_IN_S, 2 * US_IN_S, 5, 0);
 
+    test_eq(error, seL4_NoError);
+
+    start_helper(env, &client, (helper_fn_t) threshold_client_fn,
+                    endpoint, 0, (seL4_Word) &test_success, 0);
+
+    wait_for_helper(&client);
+    test_eq(test_success, 1);
+
+    return sel4test_get_result();
 }
 
-DEFINE_TEST(IPC0031, "Client server inheritance: fastpath, high threshold failure", test_single_client_fastpath_high_threshold_failure,
+int test_single_client_fastpath_high_threshold_failure(env_t env) {
+    test_single_client_high_threshold_failure(env, 1);
+}
+
+DEFINE_TEST(IPC0032, "Client-server inheritance: fastpath, client same prio, high threshold failure", test_single_client_fastpath_high_threshold_failure,
             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+
+
+
+int test_single_client_slowpath_high_threshold_failure(env_t env) {
+    test_single_client_high_threshold_failure(env, 0);
+}
+
+DEFINE_TEST(IPC0033, "Client-server inheritance: slowpath, client same prio, high threshold failure", test_single_client_slowpath_high_threshold_failure,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+
+
+/* Fastpath - Threshold exceeds max budget of SC, check returns error */
+
+
+/* Slowpath - Threshold exceeds max budget of SC, check returns error */
+// 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// DEFINE_TEST(IPC0031, "Client server inheritance: fastpath, high threshold failure", test_single_client_fastpath_high_threshold_failure,
+//             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 #endif /* CONFIG_KERNEL_MCS */
