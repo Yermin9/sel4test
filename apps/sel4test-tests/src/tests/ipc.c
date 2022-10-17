@@ -1428,12 +1428,14 @@ static void threshold_client_fn(seL4_CPtr call_endpoint, bool fastpath, volatile
 {
     uint32_t length = fastpath ? 1 : 8;
     seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, length);
-
-    // seL4_MessageInfo_t error = seL4_Call(call_endpoint, info);
-    seL4_NBSend(call_endpoint, info);
-    // if (seL4_MessageInfo_get_label(error)==seL4_IllegalOperation) {
-    //     *state=1;
-    // }
+    seL4_SetMR(0, 12345678);
+    printf("Client Running\n");
+    seL4_MessageInfo_t error = seL4_Call(call_endpoint, info);
+    // seL4_NBSend(call_endpoint, info);
+    printf("Message Label %u %u\n", seL4_MessageInfo_get_label(error), seL4_IllegalOperation);
+    if (seL4_MessageInfo_get_label(error)==seL4_IllegalOperation) {
+        *state=1;
+    }
     return;
 }
 
@@ -1450,9 +1452,13 @@ int test_single_client_high_threshold_failure(env_t env, bool fastpath)
 
     cspacepath_t path;
     vka_cspace_make_path(&env->vka, endpoint, &path);
-    seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 5 * US_IN_S);
+    seL4_Error error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 5 * US_IN_S);
+    test_eq(error, seL4_NoError);
 
-    seL4_Error error = api_sched_ctrl_configure(simple_get_sched_ctrl(&env->simple, 0), client.thread.sched_context.cptr,
+    error = seL4_CNode_CancelBadgedSends(path.root, path.capPtr, path.capDepth);
+    test_eq(error, seL4_NoError);
+
+    error = api_sched_ctrl_configure(simple_get_sched_ctrl(&env->simple, 0), client.thread.sched_context.cptr,
                                     1 * US_IN_S, 2 * US_IN_S, 5, 0);
 
     test_eq(error, seL4_NoError);
