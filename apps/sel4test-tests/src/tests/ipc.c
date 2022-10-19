@@ -1412,8 +1412,8 @@ test_single_client_fastpath_same_prio_threshold(env_t env)
 {
     return single_client_server_chain_test(env, 1, 0, 1);
 }
-// DEFINE_TEST(IPC0030, "Client-server inheritance: fastpath, client same prio, low threshold success", test_single_client_fastpath_same_prio_threshold,
-//             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+DEFINE_TEST(IPC0030, "Client-server inheritance: fastpath, client same prio, low threshold success", test_single_client_fastpath_same_prio_threshold,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 /* Slowpath - Check IPC succeeds with a small threshold */
 int
@@ -1421,18 +1421,16 @@ test_single_client_slowpath_same_prio_threshold(env_t env)
 {
     return single_client_server_chain_test(env, 0, 0, 1);
 }
-// DEFINE_TEST(IPC0031, "Client-server inheritance: slowpath, client same prio, low threshold success", test_single_client_slowpath_same_prio_threshold,
-//             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+DEFINE_TEST(IPC0031, "Client-server inheritance: slowpath, client same prio, low threshold success", test_single_client_slowpath_same_prio_threshold,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 static void threshold_client_fn(seL4_CPtr call_endpoint, bool fastpath, volatile int *state)
 {
     uint32_t length = fastpath ? 1 : 8;
     seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, length);
     seL4_SetMR(0, 12345678);
-    printf("Client Running\n");
     seL4_MessageInfo_t error = seL4_Call(call_endpoint, info);
     // seL4_NBSend(call_endpoint, info);
-    printf("Message Label %u %u\n", seL4_MessageInfo_get_label(error), seL4_IllegalOperation);
     if (seL4_MessageInfo_get_label(error)==seL4_IllegalOperation) {
         *state=1;
     }
@@ -1455,9 +1453,6 @@ int test_single_client_high_threshold_failure(env_t env, bool fastpath)
     seL4_Error error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 5 * US_IN_S);
     test_eq(error, seL4_NoError);
 
-    error = seL4_CNode_CancelBadgedSends(path.root, path.capPtr, path.capDepth);
-    test_eq(error, seL4_NoError);
-
     error = api_sched_ctrl_configure(simple_get_sched_ctrl(&env->simple, 0), client.thread.sched_context.cptr,
                                     1 * US_IN_S, 2 * US_IN_S, 5, 0);
 
@@ -1476,6 +1471,8 @@ int test_single_client_fastpath_high_threshold_failure(env_t env) {
     test_single_client_high_threshold_failure(env, 1);
 }
 
+
+/* Fastpath - Threshold exceeds max budget of SC, check returns error */
 DEFINE_TEST(IPC0032, "Client-server inheritance: fastpath, client same prio, high threshold failure", test_single_client_fastpath_high_threshold_failure,
             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
@@ -1485,14 +1482,196 @@ int test_single_client_slowpath_high_threshold_failure(env_t env) {
     test_single_client_high_threshold_failure(env, 0);
 }
 
+/* Slowpath - Threshold exceeds max budget of SC, check returns error */
 DEFINE_TEST(IPC0033, "Client-server inheritance: slowpath, client same prio, high threshold failure", test_single_client_slowpath_high_threshold_failure,
             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 
-/* Fastpath - Threshold exceeds max budget of SC, check returns error */
+static void threshold_timeout_client_fn(seL4_CPtr call_endpoint, seL4_CPtr sched_context) {
+    /* Loop until we've consumed a bunch of budget */
 
 
-/* Slowpath - Threshold exceeds max budget of SC, check returns error */
+
+    seL4_Time consumed;
+    while(consumed < 101 * US_IN_MS) {
+        long int i=0;
+        while(i<10000) {
+            i++;
+        }
+        seL4_SchedContext_Consumed_t consumed_budget = seL4_SchedContext_Consumed(sched_context);
+        consumed += consumed_budget.consumed;
+
+    }
+    
+    /* Call on the endpoint */
+    seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, 12345678);
+    seL4_Call(call_endpoint, info);
+    
+}
+
+
+int test_threshold_timeout_fault(env_t env) {
+    helper_thread_t helper;
+    seL4_Word data = 1;
+    seL4_CPtr call_endpoint = vka_alloc_endpoint_leaky(&env->vka);
+    seL4_CPtr timeout_endpoint = vka_alloc_endpoint_leaky(&env->vka);
+    seL4_CPtr ro = vka_alloc_reply_leaky(&env->vka);
+
+    cspacepath_t path;
+    vka_cspace_make_path(&env->vka, call_endpoint, &path);
+    seL4_Error error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 400 * US_IN_MS);
+    test_eq(error, seL4_NoError);
+
+    create_helper_thread(env, &helper);
+    set_helper_sched_params(env, &helper, 500 * US_IN_MS, US_IN_S, data);
+    set_helper_tfep(env, &helper, timeout_endpoint);
+
+    start_helper(env, &helper, (helper_fn_t) threshold_timeout_client_fn, call_endpoint, helper.thread.sched_context.cptr, 0, 0);
+
+    /* wait for timeout fault */
+    UNUSED seL4_MessageInfo_t info = api_recv(timeout_endpoint, NULL, ro);
+        test_eq(seL4_MessageInfo_get_length(info), (seL4_Word) seL4_Timeout_Length);
+        test_check(seL4_isTimeoutFault_tag(info));
+        test_eq(seL4_GetMR(seL4_Timeout_Data), data);
+
+    return sel4test_get_result();
+}
+
+
+/* Check that insufficent threshold triggers timeout fault */
+DEFINE_TEST(IPC0034, "Test that threshold call with insufficient budget triggers timeout fault", test_threshold_timeout_fault,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+
+
+
+
+
+
+
+
+static void threshold_defer_client_fn(seL4_CPtr call_endpoint, seL4_CPtr sched_context, seL4_CPtr final_endpoint)
+{
+    seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, 1);
+    seL4_SetMR(0, 123456789);
+    printf("Client Running\n");
+
+    /* Consume budget until we have insufficient to pass the threshold */
+    seL4_Time consumed = 0;
+    while(consumed < 500 * US_IN_MS) {
+        seL4_SchedContext_Consumed_t consumed_budget = seL4_SchedContext_Consumed(sched_context);
+        consumed += consumed_budget.consumed;
+
+    }
+
+    printf("Client calling");
+    seL4_MessageInfo_t error = seL4_Call(call_endpoint, info);
+
+    test_eq(seL4_GetMR(0), (seL4_Word) 0xdeadbeef);
+    
+    seL4_SetMR(0, 987654321);
+    seL4_Send(final_endpoint, info);
+    // test_eq(seL4_GetMR(0), (seL4_Word) 0xdeadbeef);
+    return;
+}
+
+static void threshold_defer_server_fn(seL4_CPtr receive_endpoint, seL4_CPtr reply, seL4_CPtr sched_context) {
+    ZF_LOGD("Server call");
+    printf("Server Running\n");
+
+    /* Signal test driver that we are ready */
+    seL4_MessageInfo_t info = api_nbsend_recv(receive_endpoint, info, receive_endpoint, NULL, reply);
+    printf("Server received");
+    test_eq(seL4_GetMR(0), (seL4_Word) 123456789);
+    /* Reset the SC budget tracking */
+    // seL4_SchedContext_Consumed(sched_context);
+
+
+    // while(1) {}
+    // seL4_Time consumed = 0;
+    // while(consumed < 1200 * US_IN_MS) {
+    //     /* Threshold is 800, so consume up to 750 */
+    //     seL4_SchedContext_Consumed_t consumed_budget = seL4_SchedContext_Consumed(sched_context);
+    //     consumed += consumed_budget.consumed;
+    // }
+
+    seL4_SetMR(0, 0xdeadbeef);
+    printf("Server replyRecv");
+    seL4_ReplyRecv(receive_endpoint, info, NULL, reply);
+
+    /* Make sure we don't return */
+    while(1) {}
+
+}
+
+int test_single_client_threshold_defer(env_t env) {
+    helper_thread_t client;
+    helper_thread_t server;
+    int client_prio = 10;
+
+    /* Create client */
+    create_helper_thread(env, &client);
+    set_helper_priority(env, &client, client_prio);
+
+
+    seL4_CPtr endpoint = vka_alloc_endpoint_leaky(&env->vka);
+    seL4_CPtr timeout_endpoint = vka_alloc_endpoint_leaky(&env->vka);
+
+
+    /* Create and start server */
+    create_helper_thread(env, &server);
+    set_helper_tfep(env, &server, timeout_endpoint);
+    ZF_LOGD("Start server");
+    start_helper(env, &server, (helper_fn_t) threshold_defer_server_fn, endpoint, server.thread.reply.cptr,
+                  client.thread.sched_context.cptr, 0);
+
+    ZF_LOGD("Recv for server");
+    seL4_Wait(endpoint, NULL);
+
+    /* now take it's scheduling context away */
+    seL4_Error error = api_sc_unbind(server.thread.sched_context.cptr);
+    test_eq(error, seL4_NoError);
+
+
+    /* Set threshold and start client */
+
+
+    cspacepath_t path;
+    vka_cspace_make_path(&env->vka, endpoint, &path);
+    error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 500 * US_IN_MS);
+    test_eq(error, seL4_NoError);
+
+
+
+    error = api_sched_ctrl_configure(simple_get_sched_ctrl(&env->simple, 0), client.thread.sched_context.cptr,
+                                900 * US_IN_MS, 1 * US_IN_S, 5, 0);
+
+    test_eq(error, seL4_NoError);
+
+    start_helper(env, &client, (helper_fn_t) threshold_defer_client_fn,
+                    endpoint, client.thread.sched_context.cptr, timeout_endpoint, 0);
+
+    seL4_CPtr ro = vka_alloc_reply_leaky(&env->vka);
+    seL4_MessageInfo_t info = api_recv(timeout_endpoint, NULL, ro);
+
+    test_check(!seL4_isTimeoutFault_tag(info));
+    test_eq(seL4_GetMR(0), (seL4_Word) 987654321);
+
+    return sel4test_get_result();
+}
+
+
+
+
+
+/* Check deferring works */
+DEFINE_TEST(IPC0035, "Test that thresholded endpoint appropriately defers budget", test_single_client_threshold_defer,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
+
+/* Client loops until its expended half of its budget */
+/* Then calls in to server */
+/* Server runs until its consumed a little less than threshold from server */
+
 // 
 
 
