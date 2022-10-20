@@ -1577,26 +1577,22 @@ static void threshold_defer_client_fn(seL4_CPtr call_endpoint, seL4_CPtr sched_c
 
 static void threshold_defer_server_fn(seL4_CPtr receive_endpoint, seL4_CPtr reply, seL4_CPtr sched_context) {
     ZF_LOGD("Server call");
-    printf("Server Running\n");
 
     /* Signal test driver that we are ready */
     seL4_MessageInfo_t info = api_nbsend_recv(receive_endpoint, info, receive_endpoint, NULL, reply);
-    printf("Server received");
     test_eq(seL4_GetMR(0), (seL4_Word) 123456789);
     /* Reset the SC budget tracking */
-    // seL4_SchedContext_Consumed(sched_context);
+    seL4_SchedContext_Consumed(sched_context);
 
 
-    // while(1) {}
-    // seL4_Time consumed = 0;
-    // while(consumed < 1200 * US_IN_MS) {
-    //     /* Threshold is 800, so consume up to 750 */
-    //     seL4_SchedContext_Consumed_t consumed_budget = seL4_SchedContext_Consumed(sched_context);
-    //     consumed += consumed_budget.consumed;
-    // }
+    seL4_Time consumed = 0;
+    while(consumed < 650 * US_IN_MS) {
+        /* Threshold is 700, so consume up to 650 */
+        seL4_SchedContext_Consumed_t consumed_budget = seL4_SchedContext_Consumed(sched_context);
+        consumed += consumed_budget.consumed;
+    }
 
     seL4_SetMR(0, 0xdeadbeef);
-    printf("Server replyRecv");
     seL4_ReplyRecv(receive_endpoint, info, NULL, reply);
 
     /* Make sure we don't return */
@@ -1638,7 +1634,7 @@ int test_single_client_threshold_defer(env_t env) {
 
     cspacepath_t path;
     vka_cspace_make_path(&env->vka, endpoint, &path);
-    error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 500 * US_IN_MS);
+    error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 700 * US_IN_MS);
     test_eq(error, seL4_NoError);
 
 
@@ -1665,14 +1661,11 @@ int test_single_client_threshold_defer(env_t env) {
 
 
 /* Check deferring works */
-DEFINE_TEST(IPC0035, "Test that thresholded endpoint appropriately defers budget", test_single_client_threshold_defer,
-            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
-
 /* Client loops until its expended half of its budget */
 /* Then calls in to server */
 /* Server runs until its consumed a little less than threshold from server */
-
-// 
+DEFINE_TEST(IPC0035, "Test that thresholded endpoint appropriately defers budget", test_single_client_threshold_defer,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 
 
