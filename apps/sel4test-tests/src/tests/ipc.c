@@ -1763,10 +1763,105 @@ int budget_limit_test(env_t env) {
     return sel4test_get_result();
 }
 
-DEFINE_TEST(IPC0036, "Test that budget_limits throw back when server runs too long", budget_limit_test,
+DEFINE_TEST(IPC0036, "Test that budget_limits throw back when server runs too long slowpath", budget_limit_test,
             config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 
+static void budget_limit_client_fp(seL4_CPtr call_endpoint, seL4_CPtr sched_context, seL4_CPtr final_endpoint)
+{
+    seL4_MessageInfo_t info = seL4_MessageInfo_new(0, 0, 0, 0);
+    seL4_SetMR(0, 123456789);
+    printf("Client Running\n");
+
+    printf("Client calling\n");
+    seL4_MessageInfo_t error = seL4_Call(call_endpoint, info);
+    printf("Client got timeout");
+    printf("LAbel is %lu\n", seL4_MessageInfo_get_label(error));
+    test_check(seL4_MessageInfo_get_label(error) == seL4_TimeoutError);
+    
+    seL4_SetMR(0, 9876543210);
+    seL4_Send(final_endpoint, info);
+    // test_eq(seL4_GetMR(0), (seL4_Word) 0xdeadbeef);
+    return;
+}
+
+static void budget_limit_server_fp(seL4_CPtr receive_endpoint, seL4_CPtr reply) {
+    ZF_LOGD("Server call");
+
+    /* Signal test driver that we are ready */
+    seL4_MessageInfo_t info = api_nbsend_recv(receive_endpoint, info, receive_endpoint, NULL, reply);
+    printf("Server received.\n");
+    /* Just loop forever */
+    while (1) {
+        volatile int i=0;
+        while (i<100000) {
+            i++;
+        }
+    }
+
+
+    /* Make sure we don't return */
+    while(1) {}
+
+}
+
+int budget_limit_test_fp(env_t env) {
+    helper_thread_t client;
+    helper_thread_t server;
+    int client_prio = 10;
+
+    /* Create client */
+    create_helper_thread(env, &client);
+    set_helper_priority(env, &client, client_prio);
+
+
+    seL4_CPtr endpoint = vka_alloc_endpoint_leaky(&env->vka);
+    seL4_CPtr timeout_endpoint = vka_alloc_endpoint_leaky(&env->vka);
+
+
+    /* Create and start server */
+    create_helper_thread(env, &server);
+    ZF_LOGD("Start server");
+    start_helper(env, &server, (helper_fn_t) budget_limit_server_fp, endpoint, server.thread.reply.cptr,
+                  client.thread.sched_context.cptr, 0);
+
+    ZF_LOGD("Recv for server");
+    seL4_Wait(endpoint, NULL);
+
+    /* now take it's scheduling context away */
+    seL4_Error error = api_sc_unbind(server.thread.sched_context.cptr);
+    test_eq(error, seL4_NoError);
+
+
+    /* Set threshold and start client */
+
+
+    cspacepath_t path;
+    vka_cspace_make_path(&env->vka, endpoint, &path);
+    error = seL4_CNode_Endpoint_SetThreshold(path.root, path.capPtr, path.capDepth, 700 * US_IN_MS);
+    test_eq(error, seL4_NoError);
+
+
+
+    error = api_sched_ctrl_configure(simple_get_sched_ctrl(&env->simple, 0), client.thread.sched_context.cptr,
+                                900 * US_IN_MS, 1000 * US_IN_S, 5, 0);
+
+    test_eq(error, seL4_NoError);
+
+    start_helper(env, &client, (helper_fn_t) budget_limit_client_fp,
+                    endpoint, client.thread.sched_context.cptr, timeout_endpoint, 0);
+
+    seL4_CPtr ro = vka_alloc_reply_leaky(&env->vka);
+    seL4_MessageInfo_t info = api_recv(timeout_endpoint, NULL, ro);
+
+    test_check(!seL4_isTimeoutFault_tag(info));
+    test_eq(seL4_GetMR(0), (seL4_Word) 9876543210);
+
+    return sel4test_get_result();
+}
+
+DEFINE_TEST(IPC0037, "Test that budget_limits throw back when server runs too long fastpath", budget_limit_test_fp,
+            config_set(CONFIG_KERNEL_MCS) && config_set(CONFIG_KERNEL_IPCTHRESHOLDS));
 
 
 
